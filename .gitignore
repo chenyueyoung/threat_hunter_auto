@@ -1,9 +1,13 @@
 __pycache__/
 *.pyc
 .DS_Store
+.python_path
+.tmp/
 
 .browser_profile/
 
-output/html/
+output/package/
+output/json/
+output/tmp_images/
 
 history.json

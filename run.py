@@ -9,6 +9,7 @@ from pathlib import Path
 from config import BASE_DIR, HISTORY_FILE, RUN_DAY, TITLE_KEYWORDS
 from crawler import fetch_articles
 from html_exporter import export_article_html
+from processor import process_html
 
 
 KEYWORD_PATTERN = re.compile("|".join(map(re.escape, TITLE_KEYWORDS)))
@@ -79,8 +80,14 @@ def add_history(
     """记录已成功处理的文章。"""
     article_url = article["url"].strip()
     records = load_history(history_file)
-    if any(record.get("url") == article_url for record in records):
-        return
+    for record in records:
+        if record.get("url") == article_url:
+            record["outputs"] = outputs
+            record["processed_at"] = datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+            save_history(records, history_file)
+            return
 
     records.append(
         {
@@ -95,6 +102,19 @@ def add_history(
     save_history(records, history_file)
 
 
+def package_exists(history_record: dict[str, object]) -> bool:
+    outputs = history_record.get("outputs", {})
+    if not isinstance(outputs, dict):
+        return False
+
+    package_path = outputs.get("package_path")
+    if not isinstance(package_path, str):
+        return False
+
+    package_file = BASE_DIR / package_path
+    return package_file.exists() and package_file.suffix == ".zip"
+
+
 def save_history(records: list[dict[str, object]], history_file: Path) -> None:
     """保存历史记录。"""
     history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +127,7 @@ def process_article(
     article: dict[str, str],
     period_start: date,
     period_end: date,
-) -> str:
+) -> dict[str, int | str]:
     """处理单篇文章并返回状态。"""
     title = article["title"]
     url = article["url"]
@@ -119,30 +139,42 @@ def process_article(
             published_date = date.fromisoformat(published_value)
             if not period_start <= published_date <= period_end:
                 print(f"跳过日期范围外文章：{published_date} · {title}")
-                return "outside"
-        print(f"跳过 history 已有文章：{title}")
-        return "skipped"
+                return {"status": "outside"}
+        if package_exists(history_record):
+            print(f"跳过 history 已有文章：{title}")
+            return {"status": "skipped"}
+        print(f"history 存在但文章包缺失，重新生成：{title}")
 
+    html_path = None
     try:
         result = export_article_html(article, period_start, period_end)
         if result is None:
-            return "outside"
+            return {"status": "outside"}
         html_path, published_date = result
-        relative_html_path = html_path.relative_to(BASE_DIR)
+        process_result = process_html(html_path, source_url=url)
+        relative_package_path = process_result.package_path.relative_to(BASE_DIR)
         add_history(
             article,
             {
-                "html_path": str(relative_html_path),
+                "package_path": str(relative_package_path),
                 "published_date": published_date,
             },
         )
     except (RuntimeError, OSError) as error:
         print(f"处理失败：{title}")
         print(f"失败原因：{error}")
-        return "failed"
+        return {"status": "failed"}
+    finally:
+        if html_path:
+            html_path.unlink(missing_ok=True)
 
-    print(f"HTML 生成成功：{relative_html_path}")
-    return "processed"
+    print(f"文章打包成功：{relative_package_path}")
+    return {
+        "status": "processed",
+        "package_saved": 1,
+        "image_success": process_result.image_success_count,
+        "image_failed": process_result.image_failed_count,
+    }
 
 
 def main() -> None:
@@ -180,11 +212,17 @@ def main() -> None:
         "skipped": 0,
         "outside": 0,
         "failed": 0,
+        "package_saved": 0,
+        "image_success": 0,
+        "image_failed": 0,
     }
 
     for article in target_articles:
-        status = process_article(article, period_start, period_end)
-        result_counts[status] += 1
+        result = process_article(article, period_start, period_end)
+        result_counts[result["status"]] += 1
+        result_counts["package_saved"] += result.get("package_saved", 0)
+        result_counts["image_success"] += result.get("image_success", 0)
+        result_counts["image_failed"] += result.get("image_failed", 0)
         print()
 
     print("本次运行完成：")
@@ -192,6 +230,9 @@ def main() -> None:
     print(f"- 已跳过：{result_counts['skipped']} 篇")
     print(f"- 日期范围外：{result_counts['outside']} 篇")
     print(f"- 失败：{result_counts['failed']} 篇")
+    print(f"- 文章打包数量：{result_counts['package_saved']}")
+    print(f"- 图片下载成功数量：{result_counts['image_success']}")
+    print(f"- 图片下载失败数量：{result_counts['image_failed']}")
 
 
 if __name__ == "__main__":

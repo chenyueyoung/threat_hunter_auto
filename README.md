@@ -1,47 +1,63 @@
-# ThreatHunter Article Crawler
+# ThreatHunter Intelligence Pipeline
 
-Python 自动采集《威胁猎人》网站文章，并根据关键词筛选目标内容，保存为 HTML 文件。
+This project collects ThreatHunter articles and converts each article into an independent standardized Article Package ZIP.
 
-## Features
+The output of this project is a standardized Article Package, designed as the standard input for downstream LLM analysis.
 
-- 自动采集文章
-- 关键词筛选
-- 导出 HTML
-- 防止重复采集
-
-## Project Structure
+## Pipeline
 
 ```text
-threat_hunter_auto/
-├── config.py
-├── crawler.py
-├── html_exporter.py
-├── run.py
-├── requirements.txt
-└── README.md
+ThreatHunter Website
+        ↓
+Crawler
+        ↓
+Temporary HTML
+        ↓
+Processor
+        ↓
+Article Package ZIP
+        ↓
+LLM Analysis
 ```
 
-## Installation
+## Standard Output
 
-```bash
-pip install -r requirements.txt
-playwright install chromium
+The project generates one ZIP file for each article.
+
+```text
+output/
+└── package/
+    ├── <文章标题A>.zip
+    ├── <文章标题B>.zip
+    └── ...
 ```
+
+Each ZIP contains:
+
+```text
+content.txt
+metadata.json
+images/
+```
+
+There is no extra article-title folder inside the ZIP.
 
 ## Usage
 
+首次使用：
+
 ```bash
-python3 run.py
+bash setup.sh
+```
+
+以后运行：
+
+```bash
+bash start.sh
 ```
 
 手动测试：
 
 ```bash
-python3 run.py --force
-```
-
-生成的文件保存在：
-
-```text
-output/html/
+bash start.sh --force
 ```
