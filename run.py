@@ -197,6 +197,8 @@ def package_exists(history_record: dict[str, object]) -> bool:
     package_path = outputs.get("package_path")
     if not isinstance(package_path, str):
         return False
+    if not package_path_is_archived(package_path):
+        return False
 
     package_file = BASE_DIR / package_path
     if not package_file.exists() or package_file.suffix != ".zip":
@@ -209,6 +211,19 @@ def package_exists(history_record: dict[str, object]) -> bool:
         return False
 
     return metadata.get("generator") == "threat_hunter_auto"
+
+
+def package_path_is_archived(package_path: str) -> bool:
+    parts = Path(package_path).parts
+    if len(parts) != 5:
+        return False
+    return (
+        parts[0] == "output"
+        and parts[1] == "package"
+        and re.fullmatch(r"\d{4}", parts[2]) is not None
+        and re.fullmatch(r"\d{4}-\d{2}", parts[3]) is not None
+        and parts[4].endswith(".zip")
+    )
 
 
 def save_history(records: list[dict[str, object]], history_file: Path) -> None:
@@ -332,7 +347,7 @@ def upload_packages_to_github(package_paths: list[Path]) -> str:
             print("没有需要上传的新文件")
             return "没有需要上传的新文件"
 
-        message = f"Add ThreatHunter packages: {datetime.now():%Y-%m-%d %H:%M}"
+        message = build_package_commit_message(package_paths)
         run_git(["git", "commit", "-m", message])
         run_git(["git", "push", "origin", "main"])
     except RuntimeError as error:
@@ -340,6 +355,26 @@ def upload_packages_to_github(package_paths: list[Path]) -> str:
         return "失败，本地文件已保留"
 
     return "成功"
+
+
+def build_package_commit_message(package_paths: list[Path]) -> str:
+    periods = sorted({get_package_period(path) for path in package_paths})
+    if len(periods) == 1:
+        period_text = periods[0]
+    else:
+        period_text = f"{periods[0]} to {periods[-1]}"
+    return f"Add {len(package_paths)} ThreatHunter packages for {period_text}"
+
+
+def get_package_period(package_path: Path) -> str:
+    try:
+        parts = package_path.relative_to(BASE_DIR).parts
+    except ValueError:
+        return datetime.now().strftime("%Y-%m")
+
+    if len(parts) >= 4 and re.fullmatch(r"\d{4}-\d{2}", parts[3]):
+        return parts[3]
+    return datetime.now().strftime("%Y-%m")
 
 
 def ensure_git_remote() -> None:

@@ -22,14 +22,22 @@ LLM Analysis
 
 ## 输出结构
 
-项目会为每篇文章生成一个独立 ZIP：
+项目会按报告日期自动归档，并为每篇文章生成一个独立 ZIP：
 
 ```text
 output/
 └── package/
-    ├── <文章标题A>.zip
-    ├── <文章标题B>.zip
-    └── ...
+    └── YYYY/
+        └── YYYY-MM/
+            ├── <文章标题A>.zip
+            ├── <文章标题B>.zip
+            └── ...
+```
+
+例如：
+
+```text
+output/package/2026/2026-07/配婚骗贷.zip
 ```
 
 每个 ZIP 内部直接包含：
@@ -98,11 +106,15 @@ bash start.sh \
   --push-github
 ```
 
-GitHub 自动上传依赖本机已完成 GitHub 登录。
+不带 `--push-github` 时，结果只保存在本地。
 
-程序不会保存 GitHub 密码或 Token。
+带 `--push-github` 时，程序会自动将本次生成或更新的 ZIP 提交并上传到 GitHub。
 
-不使用 `--push-github` 时，只生成本地文件。
+GitHub 上传依赖本机已配置 GitHub 登录权限；没有写入权限时，不影响本地生成结果。
+
+程序不会保存 GitHub 密码、Token、用户名或私钥。
+
+GitHub 仓库会长期保存 `output/package/` 下的 ZIP 情报包。
 
 ## 直接使用 Python 运行
 
@@ -122,3 +134,9 @@ python3 run.py --force
 `setup.sh` 会在本机生成 `.python_path`，用于让 `start.sh` 复用同一个 Python 环境。
 
 `.python_path`、浏览器缓存、临时文件、history 记录等本地文件不会上传到 GitHub。
+
+每台电脑首次使用都需要执行：
+
+```bash
+bash setup.sh
+```

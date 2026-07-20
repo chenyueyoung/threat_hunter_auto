@@ -7,6 +7,7 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
@@ -58,8 +59,10 @@ def process_html(
     """处理单个 HTML 文件，输出独立 Article Package ZIP。"""
     report_options = report_options or {}
     article = extract_article(html_path)
-    zip_path = PACKAGE_OUTPUT_DIR / f"{sanitize_filename(article['title'] or html_path.stem)}.zip"
-    PACKAGE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    report_date = resolve_report_date(str(article["date"]), report_options)
+    archive_dir = get_archive_dir(report_date)
+    zip_path = archive_dir / f"{sanitize_filename(article['title'] or html_path.stem)}.zip"
+    archive_dir.mkdir(parents=True, exist_ok=True)
 
     with TemporaryDirectory(prefix="article_package_") as temp_dir:
         package_dir = Path(temp_dir)
@@ -88,7 +91,7 @@ def process_html(
         report_vendor = report_options.get("report_vendor") or "ThreatHunter"
         metadata = {
             "title": article["title"],
-            "date": report_options.get("report_date") or article["date"],
+            "date": report_date,
             "source": report_vendor,
             "source_url": report_options.get("report_website") or source_url,
             "report_topic": report_options.get("report_topic")
@@ -109,6 +112,22 @@ def process_html(
         image_success_count=len(image_files),
         image_failed_count=failed_count,
     )
+
+
+def resolve_report_date(article_date: str, report_options: dict[str, str]) -> str:
+    """确定报告日期：命令行参数优先，其次文章日期，最后使用运行日期。"""
+    if report_options.get("report_date"):
+        return report_options["report_date"]
+    if article_date:
+        return article_date
+    if report_options.get("run_at"):
+        return report_options["run_at"][:10]
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def get_archive_dir(report_date: str) -> Path:
+    """根据报告日期返回年度、月度归档目录。"""
+    return PACKAGE_OUTPUT_DIR / report_date[:4] / report_date[:7]
 
 
 def select_html_file(path_arg: str | None) -> Path:

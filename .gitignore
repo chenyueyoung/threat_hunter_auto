@@ -1,15 +1,18 @@
+.python_path
+.venv/
+venv/
 __pycache__/
 *.pyc
 .DS_Store
-.python_path
+
 .tmp/
-
 .browser_profile/
+history.json
 
-output/package/*
-!output/package/
-!output/package/*.zip
+output/html/
+output/tmp/
+output/cache/
 output/json/
 output/tmp_images/
-
-history.json
+output/package/*.zip
+output/package/**/.DS_Store
