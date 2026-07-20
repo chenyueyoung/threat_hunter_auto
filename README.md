@@ -49,6 +49,15 @@ images/
 
 ## 首次安装
 
+下载项目：
+
+```bash
+git clone https://github.com/chenyueyoung/threat_hunter_auto.git
+cd threat_hunter_auto
+```
+
+安装依赖：
+
 ```bash
 bash setup.sh
 ```
@@ -107,3 +116,9 @@ python3 run.py --force
 ```
 
 如果当前 Python 环境缺少依赖，程序会提示需要执行的安装命令。
+
+## 本地文件说明
+
+`setup.sh` 会在本机生成 `.python_path`，用于让 `start.sh` 复用同一个 Python 环境。
+
+`.python_path`、浏览器缓存、临时文件、history 记录等本地文件不会上传到 GitHub。

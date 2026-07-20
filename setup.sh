@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
 set -u
 
-PREFERRED_PYTHON="/Library/Frameworks/Python.framework/Versions/3.10/bin/python3"
 PYTHON_PATH_FILE=".python_path"
-
-if [ -x "$PREFERRED_PYTHON" ]; then
-  PYTHON="$PREFERRED_PYTHON"
-else
-  PYTHON="$(command -v python3 || true)"
-fi
+PYTHON="$(command -v python3 || true)"
 
 if [ -z "${PYTHON:-}" ]; then
   echo "未找到 Python 3。请先安装 Python 3.10+，然后重新执行：bash setup.sh"
@@ -17,6 +11,17 @@ fi
 
 echo "使用 Python：$PYTHON"
 "$PYTHON" --version
+
+if ! "$PYTHON" - <<'PY'
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit(1)
+PY
+then
+  echo "当前 Python 版本低于 3.10。请先安装 Python 3.10+，然后重新执行：bash setup.sh"
+  exit 1
+fi
 
 if ! "$PYTHON" -m pip install \
   --timeout 600 \
