@@ -50,8 +50,13 @@ def main() -> None:
     print(f"文章包已保存：{result.package_path}")
 
 
-def process_html(html_path: Path, source_url: str = "") -> PackageResult:
+def process_html(
+    html_path: Path,
+    source_url: str = "",
+    report_options: dict[str, str] | None = None,
+) -> PackageResult:
     """处理单个 HTML 文件，输出独立 Article Package ZIP。"""
+    report_options = report_options or {}
     article = extract_article(html_path)
     zip_path = PACKAGE_OUTPUT_DIR / f"{sanitize_filename(article['title'] or html_path.stem)}.zip"
     PACKAGE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,11 +85,19 @@ def process_html(html_path: Path, source_url: str = "") -> PackageResult:
                 print(f"图片下载失败，已跳过：{image_url}")
                 print(f"失败原因：{error}")
 
+        report_vendor = report_options.get("report_vendor") or "ThreatHunter"
         metadata = {
             "title": article["title"],
-            "date": article["date"],
-            "source": "ThreatHunter",
-            "source_url": source_url,
+            "date": report_options.get("report_date") or article["date"],
+            "source": report_vendor,
+            "source_url": report_options.get("report_website") or source_url,
+            "report_topic": report_options.get("report_topic")
+            or extract_report_topic(article["title"]),
+            "report_vendor": report_vendor,
+            "run_by": report_options.get("run_by") or "未提及",
+            "run_at": report_options.get("run_at") or "",
+            "run_timezone": report_options.get("run_timezone") or "",
+            "generator": "threat_hunter_auto",
             "clean_text_file": "content.txt",
             "images": [image.__dict__ for image in image_files],
         }
@@ -255,6 +268,20 @@ def should_drop_line(line: str) -> bool:
     return False
 
 
+def extract_report_topic(title: str) -> str:
+    bracket_match = re.search(r"【([^】]+)】", title)
+    if bracket_match:
+        return bracket_match.group(1).strip()
+
+    for separator in ("：", ":"):
+        if separator in title:
+            topic = title.split(separator, 1)[0].strip()
+            if topic:
+                return topic
+
+    return title or "未提及"
+
+
 def save_json(data: dict[str, object], json_path: Path) -> None:
     with json_path.open("w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
@@ -267,6 +294,7 @@ def create_zip(package_dir: Path, zip_path: Path) -> None:
         zip_path.unlink()
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.write(package_dir / "images", "images/")
         for path in sorted(package_dir.rglob("*")):
             if path.is_file():
                 zip_file.write(path, path.relative_to(package_dir))

@@ -6,7 +6,9 @@ __pycache__/
 
 .browser_profile/
 
-output/package/
+output/package/*
+!output/package/
+!output/package/*.zip
 output/json/
 output/tmp_images/
 

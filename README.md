@@ -2,7 +2,7 @@
 
 本项目用于自动采集 ThreatHunter 文章，并将每篇文章转换为独立的标准化 Article Package ZIP。
 
-项目最终输出是标准化 Article Package，可作为后续 LLM 分析的输入。
+Article Package ZIP 可作为后续 LLM 分析的输入。
 
 ## 处理流程
 
@@ -20,9 +20,9 @@ Article Package ZIP
 LLM Analysis
 ```
 
-## 标准输出
+## 输出结构
 
-项目会为每篇文章生成一个独立 ZIP 文件：
+项目会为每篇文章生成一个独立 ZIP：
 
 ```text
 output/
@@ -32,15 +32,13 @@ output/
     └── ...
 ```
 
-每个 ZIP 内部包含：
+每个 ZIP 内部直接包含：
 
 ```text
 content.txt
 metadata.json
 images/
 ```
-
-ZIP 内部不会再额外嵌套文章标题文件夹。
 
 ## 环境要求
 
@@ -49,49 +47,63 @@ ZIP 内部不会再额外嵌套文章标题文件夹。
 - Python 3.10+
 - Git
 
-## 首次使用
-
-下载项目：
-
-```bash
-git clone https://github.com/chenyueyoung/threat_hunter_auto.git
-cd threat_hunter_auto
-```
-
-安装依赖：
+## 首次安装
 
 ```bash
 bash setup.sh
 ```
 
-## 运行方式
-
-正式运行：
+## 正式运行
 
 ```bash
 bash start.sh
 ```
 
-手动测试：
+## 测试运行
 
 ```bash
 bash start.sh --force
 ```
 
-## 输出位置
+## 指定报告参数
 
-运行完成后，结果保存在：
-
-```text
-output/package/
+```bash
+bash start.sh \
+  --force \
+  --report-topic "配婚骗贷" \
+  --report-website "https://www.threathunter.cn/" \
+  --report-date "2026-05-28" \
+  --report-vendor "威胁猎人" \
+  --run-by "陈乐扬"
 ```
 
-每篇文章对应一个 ZIP 文件，例如：
+## 运行并上传 GitHub
 
-```text
-output/package/今天结婚，明天骗贷：揭秘黑产“配婚”骗贷欺诈产业链.zip
+```bash
+bash start.sh \
+  --force \
+  --report-topic "配婚骗贷" \
+  --report-date "2026-05-28" \
+  --report-vendor "威胁猎人" \
+  --run-by "陈乐扬" \
+  --push-github
 ```
 
-## 结果用途
+GitHub 自动上传依赖本机已完成 GitHub 登录。
 
-生成的 Article Package ZIP 可以直接上传至支持文件输入的 LLM 工具，用于后续摘要、结构化分析或风险情报整理。
+程序不会保存 GitHub 密码或 Token。
+
+不使用 `--push-github` 时，只生成本地文件。
+
+## 直接使用 Python 运行
+
+推荐使用 `bash setup.sh` 和 `bash start.sh`。
+
+同时也支持：
+
+```bash
+python3 run.py
+python3 run.py --force
+```
+
+如果当前 Python 环境缺少依赖，程序会提示需要执行的安装命令。
