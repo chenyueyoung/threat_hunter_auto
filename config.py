@@ -4,12 +4,16 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-REPORT_URL = "https://www.threathunter.cn/report"
+REPORT_URL = "https://www.threathunter.cn/research"
 
 HEADLESS = False
 BROWSER_CHANNEL = "chrome"
 PAGE_TIMEOUT_MS = 60_000
-ARTICLE_LINK_SELECTOR = 'a[href*="/blog/"]'
+ARTICLE_LINK_SELECTOR = (
+    'a[href*="/blog/"], '
+    '.featured-report-copy h2 a[href^="/research/"], '
+    '.report-card h2 a[href^="/research/"]'
+)
 TITLE_KEYWORDS = ["黑产", "灰产", "骗贷", "信贷", "贷款", "欺诈", "贷"]
 RUN_DAY = 25
 

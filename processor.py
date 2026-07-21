@@ -104,6 +104,7 @@ def process_html(
             "clean_text_file": "content.txt",
             "images": [image.__dict__ for image in image_files],
         }
+        metadata.update(get_relation_metadata(report_options))
         save_json(metadata, package_dir / "metadata.json")
         create_zip(package_dir, zip_path)
 
@@ -128,6 +129,17 @@ def resolve_report_date(article_date: str, report_options: dict[str, str]) -> st
 def get_archive_dir(report_date: str) -> Path:
     """根据报告日期返回年度、月度归档目录。"""
     return PACKAGE_OUTPUT_DIR / report_date[:4] / report_date[:7]
+
+
+def get_relation_metadata(report_options: dict[str, str]) -> dict[str, object]:
+    """生成非破坏性的文章来源关系字段。"""
+    return {
+        "source_type": report_options.get("source_type") or "keyword_match",
+        "parent_url": report_options.get("parent_url") or "",
+        "parent_title": report_options.get("parent_title") or "",
+        "related_depth": int(report_options.get("related_depth") or 0),
+        "discovered_from_text": report_options.get("discovered_from_text") or "",
+    }
 
 
 def select_html_file(path_arg: str | None) -> Path:

@@ -10,14 +10,17 @@ import re
 import subprocess
 import sys
 import zipfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from config import BASE_DIR, HISTORY_FILE, RUN_DAY, TITLE_KEYWORDS
+from config import BASE_DIR, HISTORY_FILE, REPORT_URL, RUN_DAY, TITLE_KEYWORDS
 
 
 KEYWORD_PATTERN = re.compile("|".join(map(re.escape, TITLE_KEYWORDS)))
+MAX_RELATED_DEPTH = 2
 REQUIRED_MODULES = {
     "playwright": "playwright",
     "beautifulsoup4": "bs4",
@@ -35,6 +38,16 @@ class RunContext:
     run_at: str
     run_timezone: str
     push_github: bool
+
+
+@dataclass
+class ArticleTask:
+    article: dict[str, str]
+    source_type: str
+    parent_url: str
+    parent_title: str
+    related_depth: int
+    discovered_from_text: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,13 +135,44 @@ def get_monthly_period(reference_date: date) -> tuple[date, date]:
     return period_start, period_end
 
 
+def get_force_period(reference_date: date) -> tuple[date, date]:
+    """返回手动测试时当前正在进行的月度窗口。"""
+    if reference_date.day >= RUN_DAY:
+        start_year = reference_date.year
+        start_month = reference_date.month
+    elif reference_date.month == 1:
+        start_year = reference_date.year - 1
+        start_month = 12
+    else:
+        start_year = reference_date.year
+        start_month = reference_date.month - 1
+
+    period_start = date(start_year, start_month, RUN_DAY)
+    if start_month == 12:
+        period_end = date(start_year + 1, 1, RUN_DAY)
+    else:
+        period_end = date(start_year, start_month + 1, RUN_DAY)
+    return period_start, period_end
+
+
 def filter_articles(articles: list[dict[str, str]]) -> list[dict[str, str]]:
-    """筛选标题命中关键词的文章。"""
+    """筛选标题、分类或标签命中关键词的文章。"""
     return [
         article
         for article in articles
-        if KEYWORD_PATTERN.search(article.get("title", "").strip())
+        if KEYWORD_PATTERN.search(get_article_keyword_text(article))
     ]
+
+
+def get_article_keyword_text(article: dict[str, str]) -> str:
+    """拼接用于关键词筛选的文章字段。"""
+    return " ".join(
+        (
+            article.get("title", "").strip(),
+            article.get("category", "").strip(),
+            article.get("tags", "").strip(),
+        )
+    )
 
 
 def load_history(history_file: Path = HISTORY_FILE) -> list[dict[str, object]]:
@@ -152,9 +196,14 @@ def find_history_record(
     history_file: Path = HISTORY_FILE,
 ) -> dict[str, object] | None:
     """查找指定文章的历史记录。"""
+    normalized_url = normalize_url(article_url)
     records = load_history(history_file)
     return next(
-        (record for record in records if record.get("url") == article_url),
+        (
+            record
+            for record in records
+            if normalize_url(str(record.get("normalized_url") or record.get("url"))) == normalized_url
+        ),
         None,
     )
 
@@ -166,9 +215,13 @@ def add_history(
 ) -> None:
     """记录已成功处理的文章。"""
     article_url = article["url"].strip()
+    normalized_url = normalize_url(article_url)
     records = load_history(history_file)
     for record in records:
-        if record.get("url") == article_url:
+        record_url = str(record.get("normalized_url") or record.get("url"))
+        if normalize_url(record_url) == normalized_url:
+            record["url"] = article_url
+            record["normalized_url"] = normalized_url
             record["outputs"] = outputs
             record["processed_at"] = datetime.now().astimezone().isoformat(
                 timespec="seconds"
@@ -180,6 +233,7 @@ def add_history(
         {
             "title": article.get("title", "").strip(),
             "url": article_url,
+            "normalized_url": normalized_url,
             "outputs": outputs,
             "processed_at": datetime.now().astimezone().isoformat(
                 timespec="seconds"
@@ -226,6 +280,70 @@ def package_path_is_archived(package_path: str) -> bool:
     )
 
 
+def normalize_url(url: str) -> str:
+    """规范化 URL，用于 history 和本轮队列去重。"""
+    if not url:
+        return ""
+
+    parsed = urlparse(urljoin(REPORT_URL, url.strip()))
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_")
+    ]
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse(
+        (
+            parsed.scheme or "https",
+            parsed.netloc.lower(),
+            path,
+            "",
+            urlencode(query),
+            "",
+        )
+    )
+
+
+def is_threathunter_article_url(url: str) -> bool:
+    """只允许 ThreatHunter 站内研究文章详情页。"""
+    parsed = urlparse(normalize_url(url))
+    if parsed.netloc != "www.threathunter.cn":
+        return False
+    if not parsed.path.startswith("/research/"):
+        return False
+    if parsed.path.startswith(("/research/topics/", "/research/archive/")):
+        return False
+    if re.search(r"\.(pdf|zip|png|jpe?g|webp|gif)$", parsed.path, re.I):
+        return False
+    return parsed.path.rstrip("/") != "/research"
+
+
+def package_exists_for_url(article_url: str) -> bool:
+    """检查 output/package 中是否已有相同 source_url 的 ZIP。"""
+    normalized_url = normalize_url(article_url)
+    package_root = BASE_DIR / "output" / "package"
+    if not package_root.exists():
+        return False
+
+    for package_file in package_root.rglob("*.zip"):
+        try:
+            with zipfile.ZipFile(package_file) as zip_file:
+                metadata = json.loads(zip_file.read("metadata.json").decode("utf-8"))
+        except (KeyError, OSError, json.JSONDecodeError, zipfile.BadZipFile):
+            continue
+        if normalize_url(str(metadata.get("source_url", ""))) == normalized_url:
+            return True
+    return False
+
+
+def article_already_downloaded(article_url: str) -> bool:
+    """判断文章是否已由 history 或 ZIP 记录处理过。"""
+    history_record = find_history_record(article_url)
+    return bool(
+        history_record and package_exists(history_record)
+    ) or package_exists_for_url(article_url)
+
+
 def save_history(records: list[dict[str, object]], history_file: Path) -> None:
     """保存历史记录。"""
     history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -235,7 +353,7 @@ def save_history(records: list[dict[str, object]], history_file: Path) -> None:
 
 
 def process_article(
-    article: dict[str, str],
+    task: ArticleTask,
     period_start: date,
     period_end: date,
     run_context: RunContext,
@@ -243,13 +361,20 @@ def process_article(
     process_html,
 ) -> dict[str, object]:
     """处理单篇文章并返回状态。"""
+    article = task.article
     title = article["title"]
     url = article["url"]
+    published_date_from_list = article.get("date", "").strip()
+    if task.related_depth == 0 and published_date_from_list:
+        published_date = date.fromisoformat(published_date_from_list)
+        if not period_start <= published_date <= period_end:
+            print(f"跳过日期范围外文章：{published_date} · {title}")
+            return {"status": "outside", "package_path": None}
 
     history_record = find_history_record(url)
     if history_record:
         published_value = history_record.get("outputs", {}).get("published_date")
-        if published_value:
+        if task.related_depth == 0 and published_value:
             published_date = date.fromisoformat(str(published_value))
             if not period_start <= published_date <= period_end:
                 print(f"跳过日期范围外文章：{published_date} · {title}")
@@ -261,14 +386,20 @@ def process_article(
 
     html_path = None
     try:
-        result = export_article_html(article, period_start, period_end)
+        result = export_article_html(
+            article,
+            period_start,
+            period_end,
+            enforce_period=task.related_depth == 0,
+        )
         if result is None:
             return {"status": "outside", "package_path": None}
-        html_path, published_date = result
+        html_path, published_date, related_links = result
         report_options = build_article_report_options(
             run_context=run_context,
             article_url=url,
             published_date=published_date,
+            task=task,
         )
         process_result = process_html(
             html_path,
@@ -298,6 +429,7 @@ def process_article(
         "image_success": process_result.image_success_count,
         "image_failed": process_result.image_failed_count,
         "package_path": process_result.package_path,
+        "related_links": related_links,
     }
 
 
@@ -317,6 +449,7 @@ def build_article_report_options(
     run_context: RunContext,
     article_url: str,
     published_date: str,
+    task: ArticleTask,
 ) -> dict[str, str]:
     return {
         "report_topic": run_context.report_topic,
@@ -326,6 +459,11 @@ def build_article_report_options(
         "run_by": run_context.run_by,
         "run_at": run_context.run_at,
         "run_timezone": run_context.run_timezone,
+        "source_type": task.source_type,
+        "parent_url": task.parent_url,
+        "parent_title": task.parent_title,
+        "related_depth": str(task.related_depth),
+        "discovered_from_text": task.discovered_from_text,
     }
 
 
@@ -402,6 +540,78 @@ def run_git(command: list[str]) -> None:
         raise RuntimeError(detail or "Git 命令执行失败。")
 
 
+def article_in_period(
+    article: dict[str, str],
+    period_start: date,
+    period_end: date,
+) -> bool:
+    """判断列表文章日期是否位于本期范围。"""
+    published_value = article.get("date", "").strip()
+    if not published_value:
+        return True
+    published_date = date.fromisoformat(published_value)
+    return period_start <= published_date <= period_end
+
+
+def enqueue_related_articles(
+    parent_task: ArticleTask,
+    related_links: list[dict[str, str]],
+    queue,
+    queued_urls: set[str],
+    result_counts: dict[str, int],
+) -> None:
+    """把正文中发现的关联文章加入待处理队列。"""
+    result_counts["related_links_found"] += len(related_links)
+    for link in related_links:
+        link_text = link.get("link_text", "").strip()
+        link_url = link.get("link_url", "").strip()
+        normalized_url = normalize_url(link_url)
+        next_depth = parent_task.related_depth + 1
+
+        print("发现关联文章：")
+        print(f"上级文章：{parent_task.article['title']}")
+        print(f"链接文字：{link_text}")
+        print(f"关联地址：{link_url}")
+        print(f"递归深度：{next_depth}")
+
+        if next_depth > MAX_RELATED_DEPTH:
+            result_counts["related_skipped_depth"] += 1
+            print("处理结果：超过深度")
+            continue
+        if not is_threathunter_article_url(link_url):
+            result_counts["related_skipped_invalid"] += 1
+            print("处理结果：不属于文章页面")
+            continue
+        if normalized_url in queued_urls:
+            result_counts["related_skipped_downloaded"] += 1
+            print("处理结果：本次队列已存在，跳过")
+            continue
+        if article_already_downloaded(link_url):
+            result_counts["related_skipped_downloaded"] += 1
+            print("处理结果：已下载跳过")
+            continue
+
+        queued_urls.add(normalized_url)
+        queue.append(
+            ArticleTask(
+                article={
+                    "title": link_text,
+                    "url": link_url,
+                    "date": "",
+                    "category": "",
+                    "tags": "",
+                },
+                source_type="related_link",
+                parent_url=parent_task.article["url"],
+                parent_title=parent_task.article["title"],
+                related_depth=next_depth,
+                discovered_from_text=link_text,
+            )
+        )
+        result_counts["related_added"] += 1
+        print("处理结果：加入队列")
+
+
 def main() -> None:
     """运行月度采集任务。"""
     args = parse_args()
@@ -418,7 +628,10 @@ def main() -> None:
         print("如需手动测试，请运行：python3 run.py --force")
         return
 
-    period_start, period_end = get_monthly_period(today)
+    if args.force:
+        period_start, period_end = get_force_period(today)
+    else:
+        period_start, period_end = get_monthly_period(today)
     print("开始检查 ThreatHunter 文章并生成 Article Package ZIP。")
     print(f"本期范围：{period_start} 至 {period_end}（含首尾日期）\n")
 
@@ -429,11 +642,23 @@ def main() -> None:
         return
 
     target_articles = filter_articles(articles)
+    date_range_articles = [
+        article
+        for article in articles
+        if article_in_period(article, period_start, period_end)
+    ]
+    main_articles = [
+        article
+        for article in target_articles
+        if article_in_period(article, period_start, period_end)
+    ]
 
     print(
         f"\n共抓取 {len(articles)} 篇文章，"
         f"其中 {len(target_articles)} 篇符合筛选条件。\n"
     )
+    print(f"日期范围内文章：{len(date_range_articles)} 篇")
+    print(f"主文章加入队列：{len(main_articles)} 篇\n")
 
     result_counts = {
         "processed": 0,
@@ -443,12 +668,32 @@ def main() -> None:
         "package_saved": 0,
         "image_success": 0,
         "image_failed": 0,
+        "main_package_saved": 0,
+        "related_package_saved": 0,
+        "related_links_found": 0,
+        "related_added": 0,
+        "related_skipped_downloaded": 0,
+        "related_skipped_depth": 0,
+        "related_skipped_invalid": 0,
     }
     package_paths: list[Path] = []
+    queue = deque(
+        ArticleTask(
+            article=article,
+            source_type="keyword_match",
+            parent_url="",
+            parent_title="",
+            related_depth=0,
+            discovered_from_text="",
+        )
+        for article in main_articles
+    )
+    queued_urls = {normalize_url(task.article["url"]) for task in queue}
 
-    for article in target_articles:
+    while queue:
+        task = queue.popleft()
         result = process_article(
-            article,
+            task,
             period_start,
             period_end,
             run_context,
@@ -459,9 +704,24 @@ def main() -> None:
         result_counts["package_saved"] += int(result.get("package_saved", 0))
         result_counts["image_success"] += int(result.get("image_success", 0))
         result_counts["image_failed"] += int(result.get("image_failed", 0))
+        if result.get("package_saved"):
+            if task.related_depth == 0:
+                result_counts["main_package_saved"] += 1
+            else:
+                result_counts["related_package_saved"] += 1
         package_path = result.get("package_path")
         if isinstance(package_path, Path):
             package_paths.append(package_path)
+
+        related_links = result.get("related_links", [])
+        if isinstance(related_links, list):
+            enqueue_related_articles(
+                parent_task=task,
+                related_links=related_links,
+                queue=queue,
+                queued_urls=queued_urls,
+                result_counts=result_counts,
+            )
         print()
 
     github_status = "未启用"
@@ -484,6 +744,14 @@ def print_summary(
     print(f"报告时间：{run_context.report_date or '按文章发布时间自动生成'}")
     print(f"报告网站：{run_context.report_website or '按文章实际 URL 自动生成'}")
     print(f"文章打包数量：{result_counts['package_saved']}")
+    print(f"主文章成功生成 ZIP：{result_counts['main_package_saved']}")
+    print(f"关联文章成功生成 ZIP：{result_counts['related_package_saved']}")
+    print(f"从正文发现关联链接：{result_counts['related_links_found']}")
+    print(f"去重后新增关联文章：{result_counts['related_added']}")
+    print(f"因已下载而跳过关联文章：{result_counts['related_skipped_downloaded']}")
+    print(f"因超过递归深度而跳过关联文章：{result_counts['related_skipped_depth']}")
+    print(f"因不属于文章页面而跳过关联链接：{result_counts['related_skipped_invalid']}")
+    print(f"抓取失败数量：{result_counts['failed']}")
     print(f"图片下载成功数量：{result_counts['image_success']}")
     print(f"图片下载失败数量：{result_counts['image_failed']}")
     print(f"GitHub上传状态：{github_status}")

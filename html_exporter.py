@@ -3,19 +3,17 @@
 import html
 import re
 from datetime import date
-from pathlib import Path
 from html.parser import HTMLParser
-
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+from pathlib import Path
+from urllib.parse import urljoin
 
 from config import (
-    BROWSER_CHANNEL,
-    BROWSER_PROFILE_DIR,
-    HEADLESS,
     HTML_OUTPUT_DIR,
-    PAGE_TIMEOUT_MS,
+    REPORT_URL,
 )
+
+
+REQUEST_TIMEOUT_SECONDS = 30
 
 
 def export_article_html(
@@ -23,79 +21,148 @@ def export_article_html(
     period_start: date,
     period_end: date,
     output_dir: Path = HTML_OUTPUT_DIR,
-) -> tuple[Path, str] | None:
+    enforce_period: bool = True,
+) -> tuple[Path, str, list[dict[str, str]]] | None:
     """保存日期范围内的文章，范围外返回 None。"""
     title = article["title"].strip()
     url = article["url"].strip()
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / f"{sanitize_filename(title)}.html"
 
-    with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(BROWSER_PROFILE_DIR),
-            channel=BROWSER_CHANNEL,
-            headless=HEADLESS,
-        )
-        page = context.pages[0] if context.pages else context.new_page()
+    article_data = extract_article_data(url)
+    published_date = date.fromisoformat(article_data["date"])
+    if enforce_period and not period_start <= published_date <= period_end:
+        print(f"跳过日期范围外文章：{published_date} · {title}")
+        return None
 
-        try:
-            article_data = extract_article_data(page, url)
-            published_date = date.fromisoformat(article_data["date"])
-            if not period_start <= published_date <= period_end:
-                print(f"跳过日期范围外文章：{published_date} · {title}")
-                return None
-
-            article_data["bodyHtml"] = clean_article_html(
-                html.unescape(article_data["bodyHtml"])
-            )
-            document = build_standard_html(article_data)
-            page.set_content(
-                document,
-                wait_until="domcontentloaded",
-                timeout=PAGE_TIMEOUT_MS,
-            )
-            html_path.write_text(page.content(), encoding="utf-8")
-        except PlaywrightTimeoutError as error:
-            raise RuntimeError("文章页面或正文图片加载超时。") from error
-        finally:
-            context.close()
-
-    return html_path, article_data["date"]
+    article_data["bodyHtml"] = clean_article_html(article_data["bodyHtml"])
+    document = build_standard_html(article_data)
+    html_path.write_text(document, encoding="utf-8")
+    return html_path, article_data["date"], article_data["relatedLinks"]
 
 
-def extract_article_data(page, url: str) -> dict[str, str]:
-    """读取页面内嵌的文章数据。"""
+def extract_article_data(url: str) -> dict[str, object]:
+    """读取新版研究详情页正文数据。"""
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError as error:
+        raise RuntimeError("缺少 requests 或 beautifulsoup4，请先运行：bash setup.sh") from error
+
     print(f"正在读取文章原始数据：{url}")
-    page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-    page.wait_for_function(
-        "() => window.$S && window.$S.blogPostData",
-        timeout=PAGE_TIMEOUT_MS,
-    )
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        raise RuntimeError(f"文章页面请求失败：{error}") from error
 
-    data = page.evaluate(
-        """
-        () => {
-            const data = window.$S.blogPostData;
-            const meta = data.blogPostMeta;
-            const section = data.content.sections.find(
-                item => item.component?.type === "HtmlComponent"
-            );
-            return {
-                title: meta.socialMediaConfig.title,
-                date: meta.publishedAt.slice(0, 10),
-                category: meta.categories?.[0]?.name || "",
-                bodyHtml: section?.component?.value || ""
-            };
-        }
-        """
-    )
-    if not data["bodyHtml"]:
-        raise RuntimeError("页面原始数据中没有找到文章正文。")
+    soup = BeautifulSoup(response.text, "html.parser")
+    article_node = soup.select_one(".report-rich-content")
+    if not article_node:
+        raise RuntimeError("页面中没有找到新版研究正文区域。")
+
+    normalize_resource_urls(article_node, response.url)
+    data = {
+        "title": extract_title(soup),
+        "date": extract_date(soup),
+        "category": extract_category(soup),
+        "bodyHtml": str(article_node),
+        "relatedLinks": extract_related_links(article_node, response.url),
+    }
+    if not data["title"] or not data["date"] or not data["bodyHtml"]:
+        raise RuntimeError("页面正文数据不完整。")
 
     print(f"正文原始 HTML：{len(data['bodyHtml'])} 字符")
+    print(f"正文关联链接：{len(data['relatedLinks'])} 个")
     return data
+
+
+def extract_title(soup) -> str:
+    """提取文章标题。"""
+    title_node = soup.select_one("h1")
+    if title_node:
+        return title_node.get_text(" ", strip=True)
+    meta_title = soup.select_one('meta[property="og:title"]')
+    return (meta_title.get("content") or "").split("｜", 1)[0].strip()
+
+
+def extract_date(soup) -> str:
+    """提取文章发布时间。"""
+    meta_date = soup.select_one('meta[property="article:published_time"]')
+    if meta_date and meta_date.get("content"):
+        return meta_date["content"][:10]
+    text = soup.get_text(" ", strip=True)
+    match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text)
+    if match:
+        year, month, day = match.groups()
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    raise RuntimeError("无法识别文章发布时间。")
+
+
+def extract_category(soup) -> str:
+    """提取文章分类。"""
+    category_node = soup.select_one(".report-detail-heading .eyebrow")
+    if not category_node:
+        return ""
+    parts = [
+        part.strip()
+        for part in category_node.get_text(" ", strip=True).split("/")
+        if part.strip()
+    ]
+    return parts[-1] if parts else ""
+
+
+def normalize_resource_urls(article_node, base_url: str) -> None:
+    """把正文内相对链接和图片地址改为绝对地址。"""
+    for link in article_node.find_all("a"):
+        href = link.get("href")
+        if href:
+            link["href"] = urljoin(base_url, href)
+    for image in article_node.find_all("img"):
+        src = image.get("src")
+        if src:
+            image["src"] = urljoin(base_url, src)
+
+
+def extract_related_links(article_node, base_url: str) -> list[dict[str, str]]:
+    """提取正文区域中的站内研究文章链接。"""
+    links = []
+    seen_urls = set()
+    for link in article_node.find_all("a"):
+        link_text = link.get_text(" ", strip=True)
+        link_url = urljoin(base_url, link.get("href", "").strip())
+        if not link_text or not is_research_article_url(link_url):
+            continue
+        if link_url in seen_urls:
+            continue
+        seen_urls.add(link_url)
+        links.append({"link_text": link_text, "link_url": link_url})
+    return links
+
+
+def is_research_article_url(url: str) -> bool:
+    """判断链接是否像 ThreatHunter 研究文章详情页。"""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.netloc and parsed.netloc != "www.threathunter.cn":
+        return False
+    if not parsed.path.startswith("/research/"):
+        return False
+    blocked_prefixes = (
+        "/research/topics/",
+        "/research/archive/",
+    )
+    if any(parsed.path.startswith(prefix) for prefix in blocked_prefixes):
+        return False
+    if re.search(r"\.(pdf|zip|png|jpe?g|webp|gif)$", parsed.path, re.I):
+        return False
+    return parsed.path.rstrip("/") != "/research"
 
 
 def clean_article_html(body_html: str) -> str:
