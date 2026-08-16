@@ -6,6 +6,7 @@ import argparse
 import getpass
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -26,6 +27,8 @@ REQUIRED_MODULES = {
     "beautifulsoup4": "bs4",
     "requests": "requests",
 }
+GITHUB_SSH_HOST = "ssh.github.com"
+GITHUB_SSH_PORT = "443"
 
 
 @dataclass
@@ -487,12 +490,100 @@ def upload_packages_to_github(package_paths: list[Path]) -> str:
 
         message = build_package_commit_message(package_paths)
         run_git(["git", "commit", "-m", message])
-        run_git(["git", "push", "origin", "main"])
+        push_github_main()
     except RuntimeError as error:
         print(f"GitHub 上传失败：{error}")
         return "失败，本地文件已保留"
 
     return "成功"
+
+
+def push_github_main() -> None:
+    """优先通过 GitHub SSH 443 上传，失败时回退到 origin HTTPS。"""
+    ssh_url = build_github_ssh_url(get_origin_url())
+    if ssh_url and github_ssh_443_available():
+        print("GitHub上传方式：SSH 443")
+        run_git(
+            ["git", "push", ssh_url, "main:main"],
+            env=build_ssh_443_env(),
+        )
+        return
+
+    print("GitHub上传方式：HTTPS origin")
+    run_git(["git", "push", "origin", "main"])
+
+
+def get_origin_url() -> str:
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(detail or "无法读取 origin 远程地址。")
+    return result.stdout.strip()
+
+
+def build_github_ssh_url(origin_url: str) -> str:
+    """把 GitHub origin 地址转换为 ssh.github.com:443 临时推送地址。"""
+    parsed = urlparse(origin_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "github.com":
+        path = parsed.path.lstrip("/")
+        return f"ssh://git@{GITHUB_SSH_HOST}:{GITHUB_SSH_PORT}/{path}"
+
+    scp_match = re.fullmatch(r"git@github\.com:(.+)", origin_url)
+    if scp_match:
+        return f"ssh://git@{GITHUB_SSH_HOST}:{GITHUB_SSH_PORT}/{scp_match.group(1)}"
+
+    ssh_match = re.fullmatch(r"ssh://git@github\.com(?::22)?/(.+)", origin_url)
+    if ssh_match:
+        return f"ssh://git@{GITHUB_SSH_HOST}:{GITHUB_SSH_PORT}/{ssh_match.group(1)}"
+
+    return ""
+
+
+def github_ssh_443_available() -> bool:
+    """检测当前机器是否可通过 ssh.github.com:443 完成 GitHub SSH 认证。"""
+    result = subprocess.run(
+        [
+            "ssh",
+            "-T",
+            "-p",
+            GITHUB_SSH_PORT,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            f"git@{GITHUB_SSH_HOST}",
+        ],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    if "successfully authenticated" in output:
+        return True
+
+    if result.returncode != 255:
+        print("SSH 443 检测未确认可用，回退 HTTPS。")
+    else:
+        print("SSH 443 不可用，回退 HTTPS。")
+    return False
+
+
+def build_ssh_443_env() -> dict[str, str]:
+    """为本次 git push 指定 SSH 443，不修改用户的 origin remote。"""
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = (
+        f"ssh -p {GITHUB_SSH_PORT} "
+        "-o BatchMode=yes "
+        "-o ConnectTimeout=30"
+    )
+    return env
 
 
 def build_package_commit_message(package_paths: list[Path]) -> str:
@@ -527,10 +618,11 @@ def ensure_git_remote() -> None:
         raise RuntimeError("当前仓库未配置 origin 远程地址。")
 
 
-def run_git(command: list[str]) -> None:
+def run_git(command: list[str], env: dict[str, str] | None = None) -> None:
     result = subprocess.run(
         command,
         cwd=BASE_DIR,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
